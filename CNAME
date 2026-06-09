@@ -1,1 +1,282 @@
 prevleak.com
+#!/bin/bash
+
+# Exit immediately if a command exits with a non-zero status.
+set -e
+
+echo "--- Starting Custom CI/CD Pipeline for Flutter Web, Combined Mobile Apps, and Node.js Backend ---"
+
+# --- 1. Define Variables ---
+FIREBASE_PROJECT_ID="saferide-peld8"
+GITHUB_REPO_URL="https://github.com/prevleakgroup/MANIFESTXML"
+REPO_NAME="MANIFESTXML"
+
+# --- Web App Configuration ---
+WEB_FRONTEND_DIR="frontend" # Directory for your Flutter web application relative to repo root
+WEB_BACKEND_DIR="backend"   # Directory for your Node.js backend relative to repo root
+FIREBASE_HOSTING_PUBLIC_DIR="public" # Directory Firebase Hosting will serve static assets from
+NODE_RUNTIME="nodejs18" # Desired Node.js runtime for Cloud Functions
+
+# --- Mobile App Configuration (***ASSUMPTIONS MADE HERE - EDIT IF INCORRECT***) ---
+MOBILE_APP_PROJECT_PATH="mobile_app" # <--- ASSUMED: Path to your single combined Flutter mobile project
+MOBILE_APP_FLAVOR_RIDER="rider"    # <--- ASSUMED: Flavor name for Rider app
+MOBILE_APP_FLAVOR_DRIVER="driver"  # <--- ASSUMED: Flavor name for Driver app
+
+# Firebase App IDs for each of the 4 combined apps (***CONFIRMED MAPPING***)
+RIDER_ANDROID_APP_ID="1:610769160211:android:c7d2688dc64e7263cfd7e6"
+DRIVER_ANDROID_APP_ID="1:610769160211:android:7e9eee69defd00bccfd7e6"
+RIDER_IOS_APP_ID="1:610769160211:ios:66249253a97d10d2cfd7e6"
+DRIVER_IOS_APP_ID="1:610769160211:ios:e23e3573d87f2e83cfd7e6"
+
+# Firebase App Distribution Testers (***IMPORTANT: REPLACE WITH ACTUAL EMAILS***)
+APP_DISTRIBUTION_TESTERS="your_tester_email1@example.com,your_tester_email2@example.com"
+
+
+echo "Project ID: $FIREBASE_PROJECT_ID"
+echo "GitHub Repo: $GITHUB_REPO_URL"
+
+# --- 2. Install Prerequisites ---
+
+echo "--- Installing Flutter SDK ---"
+FLUTTER_CHANNEL="stable"
+FLUTTER_VERSION="3.19.6" # Specify desired Flutter version for consistency
+
+if [ ! -d "flutter_sdk_install" ]; then # Check for specific install directory
+    git clone https://github.com/flutter/flutter.git --depth 1 -b $FLUTTER_VERSION flutter_sdk_install
+    export PATH="$PATH:$(pwd)/flutter_sdk_install/bin"
+else
+    export PATH="$PATH:$(pwd)/flutter_sdk_install/bin" # Add to path if already cloned
+fi
+
+flutter doctor --quiet || { echo "Flutter setup failed. Please check the Flutter installation steps."; exit 1; }
+
+echo "--- Verifying Node.js and npm installation ---"
+node -v || { echo "Node.js not found. Please ensure it's installed or use nvm to install."; exit 1; }
+npm -v || { echo "npm not found. Please ensure it's installed."; exit 1; }
+
+echo "--- Installing Firebase CLI ---"
+npm install -g firebase-tools
+
+# --- 3. Clone Repository ---
+
+echo "--- Cloning your GitHub repository ---"
+if [ -d "$REPO_NAME" ]; then
+    echo "Removing existing repository clone..."
+    rm -rf "$REPO_NAME"
+fi
+
+git clone "$GITHUB_REPO_URL" "$REPO_NAME"
+cd "$REPO_NAME"
+
+# --- 4. Generate/Verify Firebase Configuration Files (for Web and Functions) ---
+
+echo "--- Setting up Firebase project configuration files for web and functions ---"
+
+cat > .firebaserc <<EOF
+{
+  "projects": {
+    "default": "$FIREBASE_PROJECT_ID"
+  }
+}
+EOF
+
+cat > firebase.json <<EOF
+{
+  "hosting": {
+    "public": "$FIREBASE_HOSTING_PUBLIC_DIR",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
+    "rewrites": [
+      {
+        "source": "/api/**",
+        "function": "api"
+      },
+      {
+        "source": "**",
+        "destination": "/index.html"
+      }
+    ]
+  },
+  "functions": {
+    "source": "$WEB_BACKEND_DIR",
+    "runtime": "$NODE_RUNTIME"
+  },
+  "appDistribution": {
+    "android": {
+      "riderApp": "$RIDER_ANDROID_APP_ID",
+      "driverApp": "$DRIVER_ANDROID_APP_ID"
+    },
+    "ios": {
+      "riderApp": "$RIDER_IOS_APP_ID",
+      "driverApp": "$DRIVER_IOS_APP_ID"
+    }
+  }
+}
+EOF
+
+echo "Firebase configuration files (.firebaserc and firebase.json) generated/updated."
+
+# --- 5. Build and Deploy Flutter Web Frontend & Node.js Backend ---
+
+echo "--- Building Flutter web frontend ---"
+cd "$WEB_FRONTEND_DIR" || { echo "Error: Web frontend directory '$WEB_FRONTEND_DIR' not found. Check repository structure."; exit 1; }
+flutter pub get
+flutter build web --release
+cd ..
+
+mkdir -p "$FIREBASE_HOSTING_PUBLIC_DIR"
+echo "Copying Flutter web assets to Firebase Hosting public directory: $FIREBASE_HOSTING_PUBLIC_DIR"
+cp -r "$WEB_FRONTEND_DIR/build/web/"* "$FIREBASE_HOSTING_PUBLIC_DIR/"
+
+echo "--- Preparing Node.js backend (Cloud Function) ---"
+cd "$WEB_BACKEND_DIR" || { echo "Error: Web backend directory '$WEB_BACKEND_DIR' not found. Check repository structure."; exit 1; }
+
+# Create minimal package.json and index.js if they don't exist (for example purposes)
+if [ ! -f "package.json" ]; then
+  echo "Creating minimal package.json for Node.js backend..."
+  cat > package.json <<EOT
+{
+  "name": "functions",
+  "description": "Cloud Functions for Firebase",
+  "scripts": {
+    "lint": "eslint .",
+    "serve": "firebase emulators:start --only functions",
+    "shell": "firebase functions:shell",
+    "start": "npm run shell",
+    "deploy": "firebase deploy --only functions",
+    "logs": "firebase functions:log"
+  },
+  "engines": {
+    "node": "$NODE_RUNTIME"
+  },
+  "main": "index.js",
+  "dependencies": {
+    "firebase-admin": "^11.8.0",
+    "firebase-functions": "^4.3.1",
+    "express": "^4.18.2",
+    "cors": "^2.8.5"
+  },
+  "devDependencies": {
+    "eslint": "^8.15.0",
+    "eslint-config-google": "^0.14.0",
+    "firebase-functions-test": "^3.1.0"
+  },
+  "private": true
+}
+EOT
+fi
+
+if [ ! -f "index.js" ]; then
+  echo "Creating minimal index.js for Node.js backend..."
+  cat > index.js <<EOT
+const functions = require('firebase-functions');
+const express = require('express');
+const cors = require('cors');
+
+const app = express();
+app.use(cors({ origin: true }));
+app.get('/hello', (req, res) => { res.send("Hello from Firebase Function (Node.js Backend)!"); });
+app.get('/data', (req, res) => { res.json({ message: "This is data from your Node.js backend!", timestamp: new Date().toISOString() }); });
+exports.api = functions.https.onRequest(app);
+EOT
+fi
+
+npm install
+cd ..
+
+echo "--- Deploying Flutter web (Hosting) and Node.js backend (Functions) to Firebase ---"
+firebase use "$FIREBASE_PROJECT_ID"
+firebase deploy --only hosting,functions --project "$FIREBASE_PROJECT_ID"
+
+
+# --- 6. Build and Deploy Combined Flutter Mobile Apps to Firebase App Distribution ---
+
+echo "--- Building and Deploying Combined Flutter Mobile Apps ---"
+
+cd "$MOBILE_APP_PROJECT_PATH" || { echo "Error: Mobile app project path '$MOBILE_APP_PROJECT_PATH' not found. Please check your repository structure."; exit 1; }
+flutter pub get
+
+# --- Rider App (Android) ---
+echo "--- Building Rider App (Android) with flavor: $MOBILE_APP_FLAVOR_RIDER ---"
+flutter build apk --flavor "$MOBILE_APP_FLAVOR_RIDER" --release --target-platform=android-arm64
+APK_RIDER_PATH="$(find build/app/outputs/apk/"$MOBILE_APP_FLAVOR_RIDER"/release/ -name "*.apk" -print -quit)"
+
+if [ -f "$APK_RIDER_PATH" ]; then
+  echo "--- Deploying Rider Android App to Firebase App Distribution ---"
+  firebase appdistribution:distribute "$APK_RIDER_PATH" \
+    --app "$RIDER_ANDROID_APP_ID" \
+    --testers "$APP_DISTRIBUTION_TESTERS" \
+    --release-notes "Automated CI/CD build from GitHub for Rider Android (flavor: $MOBILE_APP_FLAVOR_RIDER)." \
+    --project "$FIREBASE_PROJECT_ID"
+else
+  echo "WARNING: Android APK for Rider App (flavor: $MOBILE_APP_FLAVOR_RIDER) not found. Skipping distribution."
+fi
+
+# --- Rider App (iOS) ---
+echo "--- Building Rider App (iOS) with flavor: $MOBILE_APP_FLAVOR_RIDER (NOTE: iOS build requires macOS) ---"
+# This command will likely fail in Cloud Shell (Linux environment) but is correct for a macOS CI runner.
+flutter build ipa --flavor "$MOBILE_APP_FLAVOR_RIDER" --release --target-platform=ios
+IPA_RIDER_PATH="$(find build/ios -name "*.ipa" -print -quit)"
+
+if [ -n "$IPA_RIDER_PATH" ]; then
+  echo "--- Deploying Rider iOS App to Firebase App Distribution ---"
+  firebase appdistribution:distribute "$IPA_RIDER_PATH" \
+    --app "$RIDER_IOS_APP_ID" \
+    --testers "$APP_DISTRIBUTION_TESTERS" \
+    --release-notes "Automated CI/CD build from GitHub for Rider iOS (flavor: $MOBILE_APP_FLAVOR_RIDER)." \
+    --project "$FIREBASE_PROJECT_ID"
+else
+  echo "WARNING: iOS IPA for Rider App (flavor: $MOBILE_APP_FLAVOR_RIDER) not found. Skipping distribution."
+fi
+
+
+# --- Driver App (Android) ---
+echo "--- Building Driver App (Android) with flavor: $MOBILE_APP_FLAVOR_DRIVER ---"
+flutter build apk --flavor "$MOBILE_APP_FLAVOR_DRIVER" --release --target-platform=android-arm64
+APK_DRIVER_PATH="$(find build/app/outputs/apk/"$MOBILE_APP_FLAVOR_DRIVER"/release/ -name "*.apk" -print -quit)"
+
+if [ -f "$APK_DRIVER_PATH" ]; then
+  echo "--- Deploying Driver Android App to Firebase App Distribution ---"
+  firebase appdistribution:distribute "$APK_DRIVER_PATH" \
+    --app "$DRIVER_ANDROID_APP_ID" \
+    --testers "$APP_DISTRIBUTION_TESTERS" \
+    --release-notes "Automated CI/CD build from GitHub for Driver Android (flavor: $MOBILE_APP_FLAVOR_DRIVER)." \
+    --project "$FIREBASE_PROJECT_ID"
+else
+  echo "WARNING: Android APK for Driver App (flavor: $MOBILE_APP_FLAVOR_DRIVER) not found. Skipping distribution."
+fi
+
+# --- Driver App (iOS) ---
+echo "--- Building Driver App (iOS) with flavor: $MOBILE_APP_FLAVOR_DRIVER (NOTE: iOS build requires macOS) ---"
+flutter build ipa --flavor "$MOBILE_APP_FLAVOR_DRIVER" --release --target-platform=ios
+IPA_DRIVER_PATH="$(find build/ios -name "*.ipa" -print -quit)"
+
+if [ -n "$IPA_DRIVER_PATH" ]; then
+  echo "--- Deploying Driver iOS App to Firebase App Distribution ---"
+  firebase appdistribution:distribute "$IPA_DRIVER_PATH" \
+    --app "$DRIVER_IOS_APP_ID" \
+    --testers "$APP_DISTRIBUTION_TESTERS" \
+    --release-notes "Automated CI/CD build from GitHub for Driver iOS (flavor: $MOBILE_APP_FLAVOR_DRIVER)." \
+    --project "$FIREBASE_PROJECT_ID"
+else
+  echo "WARNING: iOS IPA for Driver App (flavor: $MOBILE_APP_FLAVOR_DRIVER) not found. Skipping distribution."
+fi
+
+cd .. # Go back to repo root
+
+
+echo "--- All Deployments Complete! ---"
+echo "Your Flutter web app is now served via Firebase Hosting: https://$FIREBASE_PROJECT_ID.web.app"
+echo "Your Node.js backend is accessible via: https://$FIREBASE_PROJECT_ID.web.app/api/**"
+echo "Mobile app builds are being distributed via Firebase App Distribution (check console)."
+
+echo "--- Next Steps ---"
+echo "1. **IMPORTANT: Review the assumptions made for MOBILE_APP_PROJECT_PATH, MOBILE_APP_FLAVOR_RIDER, and MOBILE_APP_FLAVOR_DRIVER in the script and edit them if they are incorrect for your project.**"
+echo "2. **IMPORTANT: Replace APP_DISTRIBUTION_TESTERS with the actual email addresses of your test users.**"
+echo "3. Remember, for iOS builds, you will need a macOS-based CI/CD runner. This script is primarily for demonstrating the Android and web deployment in Cloud Shell."
+echo "4. For a real, automated CI/CD setup, integrate this logic into platforms like GitHub Actions or Google Cloud Build, rather than running manually in Cloud Shell."
+echo "5. Consider committing your firebase.json and .firebaserc files to your repository for consistent configurations."
+
